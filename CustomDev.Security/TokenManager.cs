@@ -1,13 +1,25 @@
-﻿using System;
+﻿using CustomDev.Runtime.Serialization;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace CustomDev.Security
-{    
+{
+    /// <summary>
+    /// This class manage token generation.
+    /// 
+    /// Generated token are information encrypted and encoded in a base64 variant compatible
+    /// with URL :
+    /// <list type="bullet">
+    /// <item><description>'+' sign is replaced by '-'</description></item>
+    /// <item><description>'/' sign is replaced by '_'</description></item>
+    /// </list>
+    /// </summary>
     public static class TokenManager
     {
         private static readonly byte[] _key;
@@ -36,7 +48,13 @@ namespace CustomDev.Security
             }
         }
 
-        public static string Encrypt(string data)
+        /// <summary>
+        /// Encodes an object into a token.
+        /// </summary>
+        /// <param name="data"></param>
+        /// <param name="expirationDate"></param>
+        /// <returns></returns>
+        public static string Encrypt<T>(T data, DateTime? expirationDate = null)
         {
             using (Aes aes = Aes.Create())
             {
@@ -44,25 +62,34 @@ namespace CustomDev.Security
                 byte[] encryptedBytes;
 
                 using (MemoryStream memoryStream = new MemoryStream())
-                {
+                {                  
                     memoryStream.Write(BitConverter.GetBytes(aes.IV.Length), 0, sizeof(int));
                     memoryStream.Write(aes.IV, 0, aes.IV.Length);
 
                     using (CryptoStream cryptoStream = new CryptoStream(memoryStream, encryptor, CryptoStreamMode.Write))
                     {
-                        using (StreamWriter writer = new StreamWriter(cryptoStream))
-                        {
-                            writer.Write(data);
-                        }
-                        encryptedBytes = memoryStream.ToArray();
+                        byte[] tokenArray = data.SerializeToBinary();
+                        long nbTicks = expirationDate?.ToBinary() ?? 0;
+                        byte[] nbTicksArray = BitConverter.GetBytes(nbTicks);
+                        cryptoStream.Write(nbTicksArray, 0, nbTicksArray.Length);
+                        cryptoStream.Write(tokenArray, 0, tokenArray.Length);
                     }
+                    encryptedBytes = memoryStream.ToArray();
+
                 }
+
 
                 return EncodePlusSlash(Convert.ToBase64String(encryptedBytes));
             }
         }
-
-        public static string Decrypt(string encryptedData)
+        
+        /// <summary>
+        /// Decodes a token into an object
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="encryptedData">token</param>
+        /// <returns></returns>
+        public static T Decrypt<T>(string encryptedData)
         {
             using (Aes aes = Aes.Create())
             {
@@ -85,21 +112,33 @@ namespace CustomDev.Security
 
                     using (CryptoStream cryptoStream = new CryptoStream(memoryStream, decryptor, CryptoStreamMode.Read))
                     {
-                        using (StreamReader srDecrypt = new StreamReader(cryptoStream))
+                        byte[] nbTicksArray = new byte[sizeof(long)];
+                        long nbTicks;
+                        DateTime? expirationDate = null;
+                        T data;
+                        cryptoStream.Read(nbTicksArray, 0, nbTicksArray.Length);
+                        nbTicks = BitConverter.ToInt64(nbTicksArray, 0);
+                        expirationDate = nbTicks != 0 ? DateTime.FromBinary(nbTicks) : (DateTime?)null;
+
+                        data = BinarySerializer.Deserialize<T>(cryptoStream);
+
+                        if (expirationDate.HasValue && expirationDate.Value < DateTime.UtcNow)
                         {
-                            return srDecrypt.ReadToEnd();
+                            throw new SecurityException("Expired token");
                         }
+
+                        return data;
                     }
                 }
             }
         }
 
-        public static string EncodePlusSlash(string str)
+        private static string EncodePlusSlash(string str)
         {
             return str.Replace('/', '_').Replace('+', '-');
         }
 
-        public static string DecodePlusSlash(string str)
+        private static string DecodePlusSlash(string str)
         {
             return str.Replace('_', '/').Replace('-', '+');
         }
